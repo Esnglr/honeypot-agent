@@ -14,10 +14,14 @@ import threading
 import time
 from functools import partial
 import json
-from duckduckgo_search import ddg 
+from duckduckgo_search import DDGS
 import random
 import shlex
 #logging mantigi degistirilecek
+with DDGS() as ddgs:
+    results = ddgs.text("Python 3.8", max_results=2)
+    print(results)
+
 
 fake = Faker()
 

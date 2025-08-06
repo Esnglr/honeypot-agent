@@ -19,7 +19,6 @@ import random
 import shlex
 from typing import Callable
 from typing import List
-import re
 import transformers
 #logging mantigi degistirilecek
 print(DDGS().text("test", max_results=1))
@@ -165,6 +164,68 @@ class AutonomousFileAgent:
                     "backdate_days": {"type": "integer", "description": "Days to backdate", "optional": True}
                 }
             ),
+            Tool(
+                name="backdate_file",
+                func=self.backdate_file,
+                description="Backdates a file to appear older than it is. System files is more likely to be older , so keep in mind which file path and filename you are backdating.",
+                parameters={
+                    "path": {"type": "string", "description": "Path to the file to backdate."},
+                    "days": {"type": "integer", "description": "Exact number of days to backdate (optional)."},
+                    "min_days": {"type": "integer", "description": "Minimum days for random backdating (default 30)."},
+                    "max_days": {"type": "integer", "description": "Maximum days for random backdating (default 800)."}
+                }
+            ),
+            Tool(
+                name="create_process",
+                func="self.create_process",
+                description="Creates a new process with the given command. Make the system realistic , do not exaggerate.",
+                parameters={
+                    "command": {"type": "string", "description": "Command to execute."}
+                }
+            ),
+            Tool(
+                name="create_user",
+                func="self.create_user",
+                description="Creates a user account with optional parameters. Simulate a real system , how many user most likely to be in a linux file system?",
+                parameters={
+                    "username": {"type": "string", "description": "Name of the user to create (optional, will generate if not provided)."},
+                    "home_dir": {"type": "string", "description": "Home directory path (optional)."},
+                    "shell": {"type": "string", "description": "Login shell (default: /bin/bash)."},
+                    "system_account": {"type": "boolean", "description": "If True, creates a system account."}
+                }
+            ),
+            Tool(
+                name="create_group",
+                func="self.create_group",
+                description="Creates a group with optional GID.Also you can search for internet for this one for how many groups are usually are there and what are the common names for them?",
+                parameters={
+                    "group_name": {"type": "string", "description": "Name of the group to create (optional, will generate if not provided)."},
+                    "gid": {"type": "integer", "description": "Group ID (optional)."},
+                    "system_group": {"type": "boolean", "description": "If True, creates a system group."}
+                }
+            ),
+            Tool(
+                name="change_file_owner",
+                func="self.change_file_owner",
+                description="Changes ownership of a file/directory.",
+                parameters={
+                    "path": {"type": "string", "description": "Path to the file/directory."},
+                    "user": {"type": ["string", "integer"], "description": "User name or ID (optional)."},
+                    "group": {"type": ["string", "integer"], "description": "Group name or ID (optional)."}
+                }
+            ),
+            Tool(
+                name="generate_password",
+                func="self.generate_password",
+                description="Generates a random password with customizable complexity. **DO NOT CALL DIRECTLY**—this function is used internally by the system. Only provide parameter suggestions when explicitly asked.",
+                parameters={
+                    "length": {"type": "integer", "description": "Length of the password (default 10)."},
+                    "require_special_chars": {"type": "boolean", "description": "Include special characters (default True)."},
+                    "require_upper_case": {"type": "boolean", "description": "Include uppercase letters (default True)."},
+                    "require_lower_case": {"type": "boolean", "description": "Include lowercase letters (default True)."},
+                    "require_digits": {"type": "boolean", "description": "Include digits (default True)."}
+                }
+            )
         ]
 
     def ddg(self, keywords: str, max_results: int = 3) -> list:

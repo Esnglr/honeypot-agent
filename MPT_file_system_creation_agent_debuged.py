@@ -21,7 +21,6 @@ from typing import Callable
 from typing import List
 import re
 import transformers
-from vllm import LLM, SamplingParams
 #logging mantigi degistirilecek
 print(DDGS().text("test", max_results=1))
 
@@ -96,18 +95,19 @@ class FileSystemAgentActions(BaseModel):
 class AutonomousFileAgent:
     def __init__(self):
         # Initialize MPT-7B-Instruct
-        self.model_name = "mosaicml/mpt-7b-instruct"
-        self.llm = LLM(
-            model = self.model_name,
-            trust_remote_code = True,
-            dtype = "half",
-            gpu_memory_utilization = 0.8
-        )
+        self.model_name = "mistralai/Mistral-7B-Instruct-v0.2"
 
+        # Load tokenizer and model
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name,
             trust_remote_code=True
         )
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            trust_remote_code=True,
+            torch_dtype=torch.float32  # Or float16 if using CUDA
+        ).to("cpu")
 
         self.tools = self._initialize_tools()
         self.actions_log = []
@@ -404,38 +404,42 @@ class AutonomousFileAgent:
         
         tools_description = self.get_all_tool_descriptions()
         
-        structured_prompt = f"""
-        You are a honeypot automation agent. You can perform the following tools:
+        structured_prompt = f"""You are a honeypot automation agent. You can perform the following tools:
 
         {tools_description}
 
-        Your task is: {prompt}
+        Your task is: {task}
 
         Respond ONLY with a JSON object in the format:
         {{
-            "tool_name": "create_file",
-            "args": {{
-                "path": "/tmp",
-                "filename": "test.log",
-                "content_type": "log"
+        "tool_name": "create_file",
+        "args": {{
+            "path": "/tmp",
+            "filename": "test.log",
+            "content_type": "log"
         }}
         }}
+
         Do NOT include explanations, do NOT deviate from the format.
         """
 
+        mistral_prompt = f"<s>[INST] {structured_prompt.strip()} [/INST]"
 
-        outputs = self.llm.generate(
-            structured_prompt,
-            self.sampling_params,
-            use_tqdm=False
-        )
-
-        raw_output = outputs[0].outputs[0].text
-        logging.info(f"Model output: {raw_output}")
 
         try:
-            parsed = json.loads(raw_output)
-            return parsed #contains both tool_name and args
+            input_ids = self.tokenizer(mistral_prompt, return_tensors="pt").input_ids.to("cpu")
+            output_ids = self.model.generate(
+                input_ids,
+                max_new_tokens=256,
+                do_sample=True,
+                temperature=0.3,
+                top_p=0.9
+            )
+            decoded_output = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+
+            logging.info(f"Model output: {decoded_output}")
+            parsed = json.loads(decoded_output)
+            return parsed
         except Exception as e:
             logging.error(f"Failed to parse model output: {e}")
             return None

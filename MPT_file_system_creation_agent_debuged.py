@@ -15,13 +15,13 @@ import time
 from functools import partial
 import json
 from duckduckgo_search import DDGS
-from ddg_module import ddg
 import random
 import shlex
 from typing import Callable
 from typing import List
 import re
 import transformers
+from vllm import LLM, SamplingParams
 #logging mantigi degistirilecek
 print(DDGS().text("test", max_results=1))
 
@@ -97,30 +97,29 @@ class AutonomousFileAgent:
     def __init__(self):
         # Initialize MPT-7B-Instruct
         self.model_name = "mosaicml/mpt-7b-instruct"
-        config = transformers.AutoConfig.from_pretrained(self.model_name, trust_remote_code=True)
-        
-        config.attn_config['attn_impl'] = 'triton'
+        self.llm = LLM(
+            model = self.model_name,
+            trust_remote_code = True,
+            dtype = "half",
+            gpu_memory_utilization = 0.8
+        )
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.model_name,
             trust_remote_code=True
         )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            trust_remote_code=True,
-            torch_dtype=torch.float16,  # Optimize for GPU
-            device_map="auto",  # Uses GPU if available
-            attn_implementation="eager",
-            config=config
-        )
-        self.model.config.use_cache = True
-        self.model.eval()
 
         self.tools = self._initialize_tools()
         self.actions_log = []
         self.tool_dispatch = {tool.name: tool.func for tool in self.tools}
         self.current_task = None
         self.fake = Faker()
+        self.sampling_params = SamplingParams(
+            temperature=0.3,
+            top_p=0.9,
+            max_tokens=100,
+            stop=["\n\n"]
+        )
 
 
     def get_all_tool_descriptions(self) -> str:
@@ -424,13 +423,14 @@ class AutonomousFileAgent:
         Do NOT include explanations, do NOT deviate from the format.
         """
 
-        inputs = self.tokenizer(structured_prompt, return_tensors="pt").to("cuda")
-        outputs = self.model.generate(
-            **inputs,
-            max_new_tokens=100,
-            temperature=0.3
+
+        outputs = self.llm.generate(
+            structured_prompt,
+            self.sampling_params,
+            use_tqdm=False
         )
-        raw_output = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        raw_output = outputs[0].outputs[0].text
         logging.info(f"Model output: {raw_output}")
 
         try:

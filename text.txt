@@ -1,0 +1,18 @@
+# Core dependencies
+transformers==4.30.0
+torch==2.0.0
+pydantic==1.10.7
+faker==18.10.1
+duckduckgo-search==3.8.5
+
+# System utilities (usually pre-installed but listed for completeness)
+python-dateutil==2.8.2  # Required by Faker
+
+# For MPT-7B specific requirements
+accelerate>=0.20.0
+sentencepiece>=0.1.97
+einops>=0.6.1
+
+# Optional (for better performance)
+flash-attn==1.0.7  # If using flash attention
+triton>=2.0.0  # Required for triton attention

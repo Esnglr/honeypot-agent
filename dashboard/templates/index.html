@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Honeypot Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+</head>
+<body class="bg-light">
+<div class="container my-4">
+
+    <h2 class="mb-4">🐝 Honeypot Dashboard</h2>
+
+    <h4>Agents</h4>
+    <ul class="list-group mb-4">
+        {% for agent, status in agents.items() %}
+            <li class="list-group-item d-flex justify-content-between">
+                {{ agent }}
+                {% if status == "running" %}
+                    <span class="badge bg-success">Running</span>
+                {% else %}
+                    <span class="badge bg-danger">Stopped</span>
+                {% endif %}
+            </li>
+        {% endfor %}
+    </ul>
+
+    <h4>Recent Alerts</h4>
+    <table class="table table-striped">
+        <thead>
+            <tr><th>IP</th><th>Komut</th><th>Zaman</th></tr>
+        </thead>
+        <tbody>
+            {% for alert in alerts %}
+            <tr>
+                <td>{{ alert["ip"] }}</td>
+                <td>{{ alert["command"] }}</td>
+                <td>{{ alert["timestamp"] }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <h4>Recent Actions</h4>
+    <table class="table table-striped">
+    <tr><th>Action</th><th>Target IP</th><th>Status</th><th>Time</th></tr>
+    {% for action in actions %}
+    <tr>
+        <td>{{ action.action }}</td>
+        <td>{{ action.get("ip","-") }}</td>
+        <td>{{ action.status }}</td>
+        <td>{{ action.timestamp }}</td>
+    </tr>
+    {% endfor %}
+    </table>
+
+    {% with messages = get_flashed_messages() %}
+    {% if messages %}
+        <div class="alert alert-info">
+        {% for msg in messages %}
+            <p>{{ msg }}</p>
+        {% endfor %}
+        </div>
+    {% endif %}
+    {% endwith %}
+
+    <h4>Manual Actions</h4>
+    <form method="POST" action="{{ url_for('ban_ip') }}" class="d-flex mb-2">
+        <input type="text" name="ip" placeholder="IP adress" class="form-control me-2" required>
+        <button class="btn btn-danger">IP Ban</button>
+    </form>
+
+    <form method="POST" action="{{ url_for('reset') }}">
+        <button class="btn btn-warning">Honeypot Reset</button>
+    </form>
+
+</div>
+</body>
+</html>

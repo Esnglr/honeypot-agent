@@ -14,6 +14,7 @@ class TaskManager:
         self.lock = threading.Lock()
 
     def create_task(self, command: dict, target_agent: str) -> dict:
+        #command formati raw,parsed,prompt seklinde bi dict olacak sekilde dusundum
         task_id = str(Id.generate_task_id())
         timestamp = time.time()
 

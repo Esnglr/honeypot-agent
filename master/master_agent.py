@@ -8,7 +8,7 @@ from pathlib import Path
 from collections import defaultdict
 from kafka_local.kafka_consumer import KafkaConsumer
 from kafka_local.kafka_producer import KafkaProducer
-from kafka_local.topics import ATTACKER_COMMANDS, MASTER_TASKS
+from kafka_local import topics
 from utils.id_generator import Id
 from utils.logger import get_logger
 from master.task_manager import TaskManager
@@ -16,47 +16,43 @@ from master.message_router import MessageRouter
 import threading
 import time
 from typing import Dict, Any
-#import pytest ve from unittest.mock import MagicMock arastir
-
+#task_id konusunda consistent olmali her bir islemde task_id net olmali
+#master.tasks topicine gondermeyi unutma taskalri
 
 class MasterAgent:
 
     def __init__(self, agent_dir="agents"):
+        self.logger = get_logger("MasterAgent")
+
+        self.agents = {}
+        self.load_agents(agent_dir)
+        self.agents = self.load_agent_by_name(self.agents)
+
+        self.category_mapping = {"filesystem": "MPT_file_system_creation_debuged"} #functions and file names
+        for agent_name, agent_obj in self.agents.items():
+            for category in agent_obj.categories:
+                self.category_mapping[category] = []
+                self.category_mapping[category].append(agent_name)
+        
+        self.task_manager = TaskManager()
+        self.message_router = MessageRouter()
+
         self._initialize_filesystem()
 
         MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.2"
         self.pipe = pipeline("text-generation", model=MODEL_NAME)
         
-        self.task_manager = TaskManager()
-        self.message_router = MessageRouter(bootstrap_servers=["localhost:9092"])
-
-
         self.memory = {
             "fs_initialized": False
         }
-        self.memory_lock = threading.lock()
+        self.memory_lock = threading.Lock()
 
-        self.logger = get_logger("MasterAgent")
         self.consumer = KafkaConsumer(
-            topic=ATTACKER_COMMANDS,
+            topic=topics.ATTACKER_COMMANDS,
             bootstrap_servers="localhost:9092",
             group_id=Id.generate_group_id()
         )
         self.producer = KafkaProducer(bootstrap_servers="localhost:9092")
-
-        self.agents = {}
-        self.load_agents(agent_dir)
-
-        self.category_mapping = defaultdict(list)
-        for agent_name, agent_obj in self.agents.items():
-            for category in agent_obj.get_tool_names():
-                self.category_mapping[category].append(agent_name)
-
-        if not self.category_mapping.get("file_download"):
-            self.category_mapping["file_download"] = ["wget", "filesystem"]
-        
-        if not self.category_mapping.get("filesystem"):
-            self.category_mapping["filesystem"] = ["filesystem"]
 
         router_thread = threading.Thread(target=self.message_router.run, daemon=True)
         router_thread.start()
@@ -65,17 +61,6 @@ class MasterAgent:
             daemon=True
         )
         listener_thread.start()
-
-        results_consumer = KafkaConsumer(
-            topic=AGENT_RESULTS,  # Make sure to import this
-            bootstrap_servers="localhost:9092",
-            group_id=Id.generate_group_id()
-        )
-        results_thread = threading.Thread(
-            target=lambda: results_consumer.listen_forever(self.handle_agent_result),
-            daemon=True
-        )
-        results_thread.start()
 
 
     def __del__(self):
@@ -99,7 +84,7 @@ class MasterAgent:
             command={
                 "raw": "Initialize filesystem",
                 "parsed":{
-                    "command": "init_fs", # if task['command']['parsed']['command'] == 'init_fs': prompt="" -> in fs consumer
+                    "command": "init_fs", # if task['command']['raw'] == 'initilizae': prompt="" -> in fs consumer
                     "flags": [],
                     "arguments": [],
                     "category": "filesystem",
@@ -110,7 +95,7 @@ class MasterAgent:
             target_agent=fs_agent
         )
         self.message_router.route_task(task)
-        self.logger.info(f"Filesyste, initialization task created: {task['task_id']}")
+        self.logger.info(f"Filesystem, initialization task created: {task['task_id']}")
 
 
     def process_command(self, command_msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -177,9 +162,9 @@ class MasterAgent:
             # 3) Categorize the command
             categorized_input = self.categorize_command(attacker_input)
             if "error" in categorized_input:
-                self.logger.info("Error in categorization.")
+                self.logger.error("Error in categorization.")
                 self.producer.send_message(
-                    "agent_errors",
+                    topics.AGENT_RESULTS,
                     {
                         "type": "categorization_failed",
                         "error": categorized_input["error"],
@@ -189,8 +174,7 @@ class MasterAgent:
                 )
                 self.producer.flush()
                 return {"status": "error", "message": "Failed to categorize command."}
-
-
+            
             command = categorized_input.get("command")
             flags = categorized_input.get("flags")
             arguments = categorized_input.get("arguments")
@@ -230,7 +214,7 @@ class MasterAgent:
             self.logger.error(f"Command procesing failed: {str(ex)}")
             try:
                 self.producer.send_message(
-                    "agent_errors",
+                    topics.AGENT_RESULTS,
                     {
                         "type": "processing_failed",
                         "input": attacker_input,
@@ -255,32 +239,36 @@ class MasterAgent:
                 # Find all classes in the module that end with 'Agent'
                 for name, obj in inspect.getmembers(module):
                     if inspect.isclass(obj) and name.endswith("Agent"):
-                        agent_name = module_file.stem.replace("_agent", "")
-                        self.agents[agent_name] = obj()  # Instantiate the class
+                        agent_file_name = module_file.stem.replace("_agent", "")
+                        agent_name_list = agent_file_name.split('_')
+                        agent_name = ""
+                        for char in agent_name_list:
+                            agent_name += char.capitalize()
+                        self.agents[agent_file_name] = name  # Instantiate the class
                         self.logger.info(f"Loaded agent: {agent_name} ({name})")
-
+                        
             except ImportError as e:
                 self.logger.error(f"Failed to load agent {module_name}: {e}")
                 raise
 
 
-    def send_agent_event(self, event_type: str, payload: Dict[str, Any]):
-        """Standardized event sender"""
-        message = {
-            "event_id": Id.generate_short_id(),
-            "timestamp": int(time.time() * 1000),
-            "event_type": event_type,
-            "source": "master_agent",
-            "payload": payload
-        }
-        
-        try:
-            self.producer.send_message(
-                topic="agent_events",
-                message=message
-            )
-        except Exception as e:
-            self.logger.error(f"Failed to send {event_type} event: {e}")
+    def load_agent_by_name(self, agent_dict):
+        loaded_agents = {}
+        for file_name, class_name in agent_dict.items():
+            try:
+                module = importlib.import_module(f"agents.{file_name}")
+
+                if hasattr(module, class_name):
+                    agent_class = getattr(module, class_name)
+                    agent_obj = agent_class()
+                    loaded_agents[file_name] = agent_obj
+                    self.logger.info(f"Loaded agent: {class_name} from {file_name}")
+                else:
+                    self.logger.error(f"Class {class_name} not found in {file_name}")
+            except ImportError as er:
+                self.logger.error(f"Failed to import module agents.{file_name}: {er}")
+
+        return loaded_agents
 
 
     def categorize_command(self, command):
@@ -293,10 +281,10 @@ class MasterAgent:
         
         Examples:
         1. Input: "nmap -sS -A 192.168.1.1"
-        Output: {"command": "nmap", "flags": ["-sS", "-A"], "arguments": ["192.168.1.1"], "category": "network_scanning"}
+        Output: {{"command": "nmap", "flags": ["-sS", "-A"], "arguments": ["192.168.1.1"], "category": "network_scanning"}}
 
         2. Input: "tar -xzvf backup.tar.gz"
-        Output: {"command": "tar", "flags": ["-x", "-z", "-v", "-f"], "arguments": ["backup.tar.gz"], "category": "file_compression"}
+        Output: {{"command": "tar", "flags": ["-x", "-z", "-v", "-f"], "arguments": ["backup.tar.gz"], "category": "file_compression"}}
 
         Now parse: "{command}"
         """
@@ -304,7 +292,7 @@ class MasterAgent:
         output = self.pipe(prompt, max_length=200, temperature=0.1)
         
         try:
-            json_str = output[0]['generated_text'].split("Output:")[-1].strip()
+            json_str = output[0]['generated_text'].split("Output:")[-1].strip() #agenttan gelecek formata bagli olarak bu satir sorun cikartabilir
             self.logger.info("Categorization is succeded.")
             return json.loads(json_str)
         except Exception as e:
@@ -312,42 +300,11 @@ class MasterAgent:
             return {"error": str(e)}
 
 
-    def handle_agent_result(self, result: dict):
-        """Process results from agents"""
-        task_id = result.get("task_id")
-        if not task_id:
-            self.logger.warning(f"Result missing task_id: {result}")
-            return
-            
-        task = self.task_manager.get_task(task_id)
-        if not task:
-            self.logger.warning(f"Received result for unknown task: {task_id}")
-            return
-            
-        # Update task status
-        new_status = "completed" if result.get("success") else "failed"
-        self.task_manager.update_task_status(task_id, new_status)
-        
-        # special case
-        if task["target_agent"] in self.category_mapping["filesystem"] and task["command"]["parsed"].get("action") == "initialize" and new_status == "completed":
-            with self.memory_lock:
-                self.memory["fs_initialized"] = True
-
-        # Send event
-        self.send_agent_event(
-            event_type="task_result_received",
-            payload={
-                "task_id": task_id,
-                "status": new_status,
-                "agent": task["target_agent"],
-                "result": result.get("result_data", "")
-            }
-        )
-
-
     def _parse_agent_plan(self, output):
+        # sadece 3 kelimeyi anlayacak verilecek output {deploy file_agent create_file} seklinde olmali
         actions = []
         for line in output.strip().splitlines():
+            line = line.strip()
             if line.lower().startswith("deploy"):
                 parts = line.split()
                 if len(parts) >= 3:
@@ -355,94 +312,27 @@ class MasterAgent:
                     actions.append((agent_name, action))
         return actions
 
+
     def _get_agent_descriptions(self):
-        desc = ""
-        for name, agent in self.agents.items():
-            tools = ", ".join(agent.get_tool_names())
-            desc += f"- {name}: handles [{tools}]\n"
-        return desc
-
-
-    def handle_file_download(self, url: str, outfile: str=None, ip: str=None, user: str="unknown"):
-        transaction_id = Id.generate_short_id()
-        start_time = time.time()
-
-        try:
-            self.send_agent_event(
-                event_type="download_coordination_start",
-                payload={
-                    "transaction_id": transaction_id,
-                    "url": url,
-                    "target_file": outfile,
-                    "source_ip": ip,
-                    "user": user
-                }
-            )
-
-            wget_agent = self.agents.get("wget")
-            if not wget_agent:
-                raise ValueError("Wget agent is not available.")
-
-            download_result = wget_agent.file_metadata(
-                url=url,
-                outfile=outfile,
-                quiet=False
-            )
-            
-            file_agent = next((a for a in self.agents.values() 
-                            if "filesystem" in a.get_tool_names()), None)
-            
-            if not file_agent:
-                raise ValueError("Filesystem agent not available")
-
-            creation_result = file_agent.create_file(
-                filename=download_result['filename'],
-                file_type=download_result['file_type'],
-                size=download_result['size'],
-                content_type=download_result['content_type'],
-                source_url=url
-            )
-
-            self.send_agent_event(
-                agent_name="master",
-                event_type="download_coordination_complete",
-                payload={
-                    "transaction_id": transaction_id,
-                    "status": "success",
-                    "metrics": {
-                        "duration_ms": int((time.time() - start_time) * 1000),
-                        "file_size": download_result['size']
-                    }
-                }
-            )
-
-            return{
-                "status": "success",
-                "download": download_result,
-                "file_creation": creation_result
-            }
-
-        except Exception as e:
-            self.send_agent_event(
-                agent_name="master",
-                event_type="download_coordination_failed",
-                payload={
-                    "transaction_id": transaction_id,
-                    "error": str(e),
-                    "stage": "coordination"
-                }
-            )
-            raise
+        #description verirken kullanilan \n ibareleri belki prompta agentin kafasini karistirabilir emin degilim.
+        desc = {}
+        for agent_name, agent_obj in self.agents.items():
+            desc[agent_name] = {}
+            desc[agent_name] = agent_obj.categories
+        return desc 
 
 
 if __name__ == "__main__":
+    #categories listeden dicte donusturuldu
+    master = MasterAgent()
+
     if len(sys.argv) < 2:
-        self.logger.warning("Parameters are not given properly")
+        master.logger.warning("Parameters are not given properly")
         sys.exit(1)
 
     attacker_input = " ".join(sys.argv[1:])
     
-    master = MasterAgent()
+
     try:
         # Keep main thread alive
         while True:

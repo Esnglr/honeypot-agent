@@ -44,6 +44,7 @@ class WgetConsumer:
                     #command = parsed["command"]
                     if action == "run":
                         try:
+                            #mime type a ihtiyaci var
                             self.agent.start(**task)
                         except Exception as ex:
                             self.logger.error(f"Error starting wget agent: {ex}")

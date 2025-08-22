@@ -23,7 +23,7 @@ class MessageRouter:
         
         agent_topic_map = {
             "ai_interactor": topics.WGET_TASKS,
-            "file_system_agent": topics.FS_TASKS
+            "MPT_file_system_creation_debuged": topics.FS_TASKS
         }
         topic = agent_topic_map.get(target_agent)
         if not topic:
@@ -32,6 +32,7 @@ class MessageRouter:
         
         self.logger.info(f"Routing task {task.get('task_id')} to topic {topic}")
         self.producer.send_message(topic, task)
+        self.producer.send_messahe(topics.MASTER_TASKS, task)
 
 
     def route_result(self, result: dict):

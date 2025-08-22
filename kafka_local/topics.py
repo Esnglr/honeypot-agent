@@ -1,7 +1,4 @@
-"""
-Kafka topic definitions for the Honeypot project.
-Keeping all topic names in one place ensures consistency across producers and consumers.
-"""
+# karisiklik cikmasin diye
 
 # Topic for raw attacker commands captured from the honeypot
 # saf saldirgan komutlari burada tutuluyor tpot to kafka buraya gonderi yapiyor data set olusturmak icin uygun  

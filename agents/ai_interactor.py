@@ -2,30 +2,66 @@ import json
 import random
 import time
 from typing import Dict, Any, Optional
+from utils.logger import get_logger
 from transformers import pipeline
 from faker import Faker
-from twisted.python import log
-from master.master_agent import MasterAgent
+#wget consumer mime type verip cagirmali
+#consumeri var zaten bu dosyanin icinde consumer cagirilmayacak
 
-
-class AiInteractorWget:
+class AiInteractorWgetAgent:
 
     def __init__(self, mime_type: str = 'text/plain'):
+        self.categories = {
+            "get_response": 
+                """Main method called by wget.py to get AI-generated responses.
+                Args:
+                context: Dictionary containing command context (e.g., URL, user, stage).
+                Returns:Dict with 'status' (success/error) and 'result' (AI-generated content).""",
+            "generate_file_content": 
+                """Generate realistic fake content for simulated downloads.
+                Args:
+                    file_type: File extension (e.g., 'exe', 'txt').
+                Returns:
+                    Bytes of generated content.
+                """}
         self.mime_type = mime_type
+        self.logger = get_logger("wget-logger")
         self.faker = Faker()
-        self.master_agent = MasterAgent()  # For coordination with other agents
         self.llm = pipeline("text-generation", model="distilgpt2", device="cpu")
-
+    
     
     def _query_ai_service(self, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         action = payload.get("action")
-        prompt = f"Simulate a wget {action} for {payload.get('url', 'a file')}. Be concise."
-
+        # Format response based on action
+        #pass edilicek action in bu uc state uyumlu olmasina dikkat et
+        if action == "wget_connect":
+            prompt = f"""
+            Generate a realistic wget terminal output for connecting to {payload.get('host', 'a host')}.
+            The output should look exactly like real wget connection progress.
+            Example: 'Connecting to example.com (93.184.216.34:443)... connected.'
+            Output only the terminal message, nothing else:
+            """
+        elif action == "wget_download":
+            prompt = f"""
+            Generate a realistic wget download progress output for {payload.get('outfile', 'a file')}.
+            Include percentage, speed, and ETA like real wget.
+            Example: '100%[=================>] 1.2M  1.5MB/s  00:01'
+            Output only the terminal message, nothing else:
+            """
+        elif action == "wget_error":
+            error_type = payload.get('error_type', 'generic')
+            prompt = f"""
+            Generate a realistic wget error message for {error_type} error.
+            Make it look like real terminal error output.
+            Example: 'wget: unable to resolve host address example.com'
+            Output only the terminal message, nothing else:
+            """
+        else:
+            return None
         try:
-            ai_response = self.llm(prompt, max_length=50, do_sample=True)[0]["generated_text"]
-            ai_response = ai_response.strip()
+            ai_response = self.llm(prompt, max_new_tokens=50, temperature=0.2)[0]["generated_text"]
+            ai_response = ai_response.replace(prompt, "").strip()
 
-            # Format response based on action
             if action == "wget_connect":
                 return {"status": "success", "result": ai_response}
             elif action == "wget_download":
@@ -34,8 +70,9 @@ class AiInteractorWget:
                 return {"status": "success", "message": ai_response}
             else:
                 return None
+
         except Exception as ex:
-            log.msg(f"Local LLM query failed: {str(ex)}")
+            self.logger.error(f"Local LLM query failed: {str(ex)}")
             return None
 
     
@@ -50,6 +87,7 @@ class AiInteractorWget:
         try:
             stage = context.get('stage', 'connect')
             
+            #getattr ile de yapilabilir ama bosverelim
             if stage == 'connect':
                 return self._handle_connect_stage(context)
             elif stage == 'download':
@@ -63,7 +101,7 @@ class AiInteractorWget:
                 }
                 
         except Exception as ex:
-            log.msg(f"AI Interactor Error: {str(ex)}")
+            self.logger.error(f"AI Interactor Error: {str(ex)}")
             return {'status': 'error','result': None}
 
 
@@ -84,7 +122,7 @@ class AiInteractorWget:
         if ai_response and ai_response.get('status') == 'success':
             return {
                 'status': 'success',
-                'result': f"[AI] Connecting to {host} (simulated by AI)..."
+                'result': ai_response['result']
             }
         else:
             # Fallback to local simulation
@@ -111,12 +149,12 @@ class AiInteractorWget:
         if ai_response and ai_response.get('content'):
             return {
                 'status': 'success',
-                'result': f"[AI] Downloading {outfile} ({mime_type})..."
+                'result': ai_response['content']
             }
         else:
             return {
                 'status': 'success',
-                'result': f"Downloading {outfile} (simulated)..."
+                'result': '100%[=================>] 1.2M  1.5MB/s  00:01'
             }
 
 
@@ -135,14 +173,15 @@ class AiInteractorWget:
         if ai_response and ai_response.get('message'):
             return {
                 'status': 'success',
-                'result': f"[AI] Error: {ai_response['message']}"
+                'result': ai_response['message']
             }
         else:
             # Fallback errors
             errors = {
-                'timeout': "Connection timed out after 30 seconds.",
-                'ssl_error': "SSL certificate verification failed.",
-                'http_error': "404 Not Found"
+                'timeout':  "wget: download timed out",
+                'ssl_error':  "wget: SSL certificate problem: unable to get local issuer certificate",
+                'http_error': "wget: server returned error: HTTP/404 Not Found",
+                'resolve_error': "wget: unable to resolve host address"
             }
             return {
                 'status': 'success',
@@ -150,31 +189,12 @@ class AiInteractorWget:
             }
 
 
-    def generate_file_content(self, file_type: str) -> bytes:
-        """
-        Generate realistic fake content for simulated downloads.
-        Args:
-            file_type: File extension (e.g., 'exe', 'txt').
-        Returns:
-            Bytes of generated content.
-        """
-        if file_type == 'txt':
-            return self.faker.text().encode()
-        elif file_type == 'html':
-            return f"<html><body>{self.faker.html()}</body></html>".encode()
-        elif file_type == 'exe':
-            return self._generate_fake_pe_file()
-        else:
-            return b'X' * 1024  # Default dummy data
-
-
-    def _generate_fake_pe_file(self) -> bytes:
-        """
-        Generate a fake PE (Windows EXE) header for realism.
-        """
-        # Simulate a minimal PE header
-        pe_header = (
-            b'MZ\x90\x00\x03\x00\x00\x00\x04\x00\x00\x00\xff\xff\x00\x00'
-            b'\xb8\x00\x00\x00\x00\x00\x00\x00@\x00\x00\x00\x00\x00\x00\x00'
-        )
-        return pe_header + bytes([random.randint(0, 255) for _ in range(128)])
+if __name__ == "__main__":
+    wget_agent = AiInteractorWgetAgent()
+    test_payload_download = {
+    "action": "wget_download", 
+    "url": "https://example.com/file.txt",
+    "outfile": "downloaded_file.txt",
+    "mime_type": "text/plain"
+    }
+    wget_agent._query_ai_service(test_payload_download)

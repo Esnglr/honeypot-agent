@@ -12,30 +12,45 @@ from urllib import parse
 import hashlib
 from twisted.internet import error
 from twisted.internet.defer import inlineCallbacks
-from twisted.python import log
 from twisted.web.iweb import UNKNOWN_LENGTH
 import treq
 from twisted.internet import reactor
 from twisted.internet.defer import Deferred
 from twisted.web.http_headers import Headers
 from urllib.parse import urlparse
-from agents.ai_interactor import AiInteractorWget
-from agents.master_agent import MasterAgent
-from agents.MPT_file_system_creation_agent import AutonomousFileAgent
-import metrics
 
-# AI Configuration (will be set via T-Pot config)
-AI_ENABLED = False
-AI_CONTAINER_URL = "http://ai-agent:5000"  # Default Docker network address
+try:
+    from agents.ai_interactor import AiInteractorWget
+    from agents.master_agent import MasterAgent
+    from agents.MPT_file_system_creation_agent import AutonomousFileAgent
+    AI_ENABLED = True
+except ImportError:
+    AI_ENABLED = False
+
+from utils.logger import get_logger
+from utils.id_generator import Id
+from dashboard.consumer_alerts import AlertConsumer
+import threading
+from kafka_local.kafka_producer import KafkaProducer
+from kafka_local.kafka_consumer import KafkaConsumer
+
+logger = get_logger("wget-global")
 
 try:
     from cowrie.fake_commands import ai_interactor
 except ImportError:
     ai_interactor = None
-    log.msg("AI Interactor module (ai_interactor.py) not found or not in PYTHONPATH!")
+    logger.error("AI Interactor module (ai_interactor.py) not found or not in PYTHONPATH!")
 from cowrie.core.artifact import Artifact
 from cowrie.core.config import CowrieConfig
 from cowrie.shell.command import HoneyPotCommand
+
+# AI Configuration (will be set via T-Pot config)
+AI_CONTAINER_URL = "http://ai-agent:5000"  # Default Docker network address
+
+ALERT_CONSUMER = None
+BLOCKED_IPS = set()
+BANNED_IPS_LOCK = threading.Lock()
 
 commands = {}
 
@@ -71,6 +86,70 @@ def splitthousands(s: str, sep: str = ",") -> str:
     if len(s) <= 3:
         return s
     return splitthousands(s[:-3], sep) + sep + s[-3:]
+
+def alert_consumer(brokers=["localhost:9092"]):
+    global BANNED_IPS
+    try:
+        ALERT_CONSUMER = KafkaConsumer(
+            'security.actions',
+            bootstrap_servers=brokers,
+            group_id=f"wget-conusmer-{Id.generate_group_id()}",
+            auto_offset_reset='earliest',
+            enable_auto_commit=True,
+            auto_commit_interval_ms=1000
+        )
+        
+        def consume_actions():
+            try:
+                for msg in ALERT_CONSUMER:
+                    action_data = msg.value
+                    if (action_data.get('action') == 'ban_ip' and 
+                        action_data.get('status') == 'completed' and
+                        action_data.get('ip')):
+                        ip = action_data['ip']
+                        with BANNED_IPS_LOCK:
+                            BANNED_IPS.add(ip)
+                        logger.info(f"IP banned and added to blacklist: {ip}")
+            except Exception as ex:
+                logger.error(f"Alert consumer error: {ex}")
+        
+        threading.Thread(target=consume_actions, daemon=True).start()
+        logger.info("Started to consume banned ips")
+    except Exception as ex:
+        logger.error(f"Failed to initialize alert banned-ip consumer: {ex}")
+
+alert_consumer()
+
+# twisted async sekilde calisabilmesi icin inlinecallbacks ile tanimlamaliyiz
+@inlineCallbacks
+def communication_allowed(host):
+    #alert_consumer is an object which in consumer_alerts.py
+    try:
+        with BANNED_IPS_LOCK:
+            if host in BANNED_IPS:
+                logger.info(f"Host {host} is banned via dashboard, denying communication")
+                returnValue(False)
+        
+        #can also give static BLOCKED_HOSTS list or set
+        """
+        if host in BLOCKED_HOSTS:
+            logger.info(f"Host {host} is in blacklist, denying communication")
+            return False
+        """
+        if host.endswith('.internal') or host.endswith('.local') or host.endswith('.lan'):
+            logger.info(f"Host {host} is internal, denying communication")
+            returnValue(False)
+        
+        if host in ['localhost','127.0.0.1', '::1']:
+            logger.info(f"Host {host} is localhost, denying communication")
+            returnValue(False)
+
+        yield reactor.callLater(random.uniform(0.1,0.5),lambda:None)
+        returnValue(True)
+
+    except Exception as ex:
+        logger.error(f"Error in communication_allowed check for {host}: {ex}")
+        returnValue(False)
 
 
 class CommandWget(HoneyPotCommand):
@@ -138,7 +217,7 @@ class CommandWget(HoneyPotCommand):
             self.ext = self.args[0].split('.')[-1].lower() if '.' in self.args[0] else 'txt'
         self.mime_type, self.content_length = self.file_types.get(self.ext, ('application/octet-stream', 0))
         
-        self.kafka_producer = KafkaProducer({
+        self.producer = KafkaProducer({
             'client.id': f'wget-{self.protocol.getSessionId()}'
         })
 
@@ -156,6 +235,7 @@ class CommandWget(HoneyPotCommand):
             'ai_interactor': AiInteractorWget(mime_type=self.mime_type) if AI_ENABLED else None
         }
         
+        self.logger = get_logger("wget-command")
         # Original implementation variables
         self.outfile: str | None = None
         self.artifact = Artifact("wget-download")
@@ -185,7 +265,7 @@ class CommandWget(HoneyPotCommand):
             'duration': tdiff(time.time() - self.ai_context['start_time']),
             'timestamp': time.time(),
         }
-        log.msg(json.dumps(log_data))
+        self.logger.info(json.dumps(log_data))
         return log_data
 
     def _get_ai_response(self, stage: str, options: list = None, **kwargs) -> str:
@@ -217,15 +297,15 @@ class CommandWget(HoneyPotCommand):
             return {'success': False, 'response': None}
             
         except Exception as e:
-            log.msg(f"AI processing failed: {e}")
+            self.logger.error(f"AI processing failed: {e}")
             return {'success': False, 'response': None}
 
 
     def file_metadata(self, url:str, outfile: str, quiet: bool=False) -> dict:
-        download_id = str(uuid.uuid4())
+        download_id = Id.generate_short_id()
         
         # Send start event
-        self.kafka_producer.send_event(
+        self.producer.send_event(
             topic="download_events",
             event_type="download_start",
             payload={
@@ -239,13 +319,13 @@ class CommandWget(HoneyPotCommand):
         )
         
         # Send completion event
-        self.kafka_producer.send_event(
+        self.producer.send_event(
             topic="download_events",
             event_type="download_complete",
             payload={
                 "download_id": download_id,
                 "size": content_length,
-                "duration_ms": int((time.time() - start_time) * 1000),
+                "duration_ms": int((time.time() - self.ai_context['start_time']) * 1000),
                 "status": "success"
             }
         )
@@ -310,9 +390,9 @@ class CommandWget(HoneyPotCommand):
         port_to_display = urldata.port if urldata.port else (443 if urldata.scheme == 'https' else 80)
         self.errorWrite(f"Connecting to {self.host} ({self.host})|{first_ip}|:{port_to_display}... connected.\n")
 
-        allowed = yield communcation_allowed(self.host)
+        allowed = yield communication_allowed(self.host)
         if not allowed:
-            log.msg(f"Blocked host access attempt: {self.host}")
+            self.logger.warning(f"Blocked host access attempt: {self.host}")
             self.errorWrite(f"wget: unable to resolve host address '{self.host}'\n")
             self._log('blocked', 'host_blocked')
             self.exit()
@@ -404,7 +484,7 @@ class CommandWget(HoneyPotCommand):
                           f"[{response.headers.getRawHeaders(b'content-type')[0].decode()}]\n")
             self.errorWrite(f"Saving to: '{self.outfile}'\n\n")
 
-        response.deliveryBody(self.protocol)
+        response.deliverBody(self)
 
     def wget_download(self, url:str, headers:list = None) -> Any:
         self._log('simulated_download_start', url=url)
@@ -492,31 +572,40 @@ class CommandWget(HoneyPotCommand):
                 self.totallength,
                 self.totallength))
         
-        # here call the agent to create a file acording to it 
+        # here call the agent to create a file acording to it ve format master ile consistent olmali
         try:
-            master_agent = MasterAgent()
-            result = master_agent.handle_file_download(
-                url=self.url.decode() 
-                if isinstance(self.url, bytes) 
-                else self.url, 
-                outfile=self.outfile, 
-                ip=self.ai_context['ip'], 
-                user=self.ai_context['user'])
+            task_message = {
+                "type": "file_download",
+                "payload": {
+                    "url": self.url.decode() if isinstance(self.url, bytes) else self.url,
+                    "output_path": self.outfile,
+                    "original_url": self.url.decode() if isinstance(self.url, bytes) else self.url,
+                    "ip_address": self.ai_context['ip'],
+                    "username": self.ai_context['user'],
+                    "file_size": self.content_length,
+                    "file_type": self.ext,
+                    "download_time": elapsed,
+                    "session_id": self.protocol.getSessionId(),
+                    "source" : "wget"
+                },
+                "timestamp": time.time(), # indirilme zamanini vericek file agentta kullanicaz
+                "version": "1.0"
+            }
+            
+            self.producer.send_message(topic="filesystem.tasks",value=task_message)
+            self.producer.flush()
+            self.logger.info(f"File creation task sent to Kafka: {task_message['task_id']}")
 
-            if not results.get('file_creation', {}).get('success'):
-                self.errorWrite('Warning: File creation completed with issues\n')
-        
         except Exception as ex:
-            self.errorWrite(f"Error in file handling {str(ex)}\n")
-            self._log('file_creation_error', str(ex))
-        
+            self.errorWrite(f"Error sending to Kafka: {str(ex)}\n")
+            #kullaniciya burda bir error ciktisi vermemize gerek var mi?        
 
     def handle_CTRL_C(self) -> None:
         self.errorWrite("^C\n")
         self.exit()
 
 # Command registration
-commands["/usr/bin/wget"] = Command_wget
-commands["wget"] = Command_wget
-commands["/usr/bin/dget"] = Command_wget
-commands["dget"] = Command_wget
+commands["/usr/bin/wget"] = CommandWget
+commands["wget"] = CommandWget
+commands["/usr/bin/dget"] = CommandWget
+commands["dget"] = CommandWget
